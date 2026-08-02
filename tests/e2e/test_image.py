@@ -31,7 +31,7 @@ EXPECTED_TOOLS = {
         "list_mailboxes",
     },
     "create": {"create_custom_alias", "create_random_alias", "create_alias_contact"},
-    "update": {"update_alias", "toggle_alias"},
+    "update": {"update_alias", "toggle_alias", "toggle_contact_block"},
 }
 
 
@@ -282,7 +282,8 @@ class TestWorkflowThroughTheImage:
             alias_id = created["id"]
 
             await client.call_tool(
-                "update_alias", {"alias_id": alias_id, "note": "amended", "pinned": True}
+                "update_alias",
+                {"alias_id": alias_id, "note": "amended", "pinned": "true"},
             )
             fetched = (await client.call_tool("get_alias", {"alias_id": alias_id})).data
             assert fetched["note"] == "amended"

@@ -59,6 +59,19 @@ def _explicit_page(page_id: int) -> int | None:
     return None if page_id <= AUTO_PAGINATE else page_id
 
 
+#: Optional booleans hit the same gateway problem as optional ints -- ``bool |
+#: None`` renders as ``anyOf: [{"type": "boolean"}, {"type": "null"}]``, which a
+#: stringified argument satisfies neither branch of. Unlike an int there is no
+#: spare value to use as a sentinel, so this is a three-valued *string* enum:
+#: string branches survive the gateway intact.
+TriState = Literal["true", "false", "unchanged"]
+
+
+def _tri(value: str) -> bool | None:
+    """Map the tri-state enum onto an optional bool."""
+    return None if value == "unchanged" else value == "true"
+
+
 def _surface_api_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Turn SimpleLogin failures into ToolError with the API's own wording.
 
@@ -318,21 +331,27 @@ def register_tools(
             str | None, Field(description="Replacement display name.")
         ] = None,
         mailbox_ids: Annotated[
-            list[int] | None,
-            Field(description="Replacement set of owning mailbox ids."),
-        ] = None,
+            list[int],
+            Field(
+                description=(
+                    "Replacement set of owning mailbox ids. Empty list leaves them "
+                    "unchanged."
+                )
+            ),
+        ] = [],  # noqa: B006 -- read-only sentinel, never mutated
         disable_pgp: Annotated[
-            bool | None, Field(description="Disable PGP even if mailboxes support it.")
-        ] = None,
-        pinned: Annotated[bool | None, Field(description="Pin or unpin.")] = None,
+            TriState,
+            Field(description="Disable PGP even if mailboxes support it."),
+        ] = "unchanged",
+        pinned: Annotated[TriState, Field(description="Pin or unpin.")] = "unchanged",
     ) -> Any:
         return await client.update_alias(
             alias_id,
             note=note,
             name=name,
-            mailbox_ids=mailbox_ids,
-            disable_pgp=disable_pgp,
-            pinned=pinned,
+            mailbox_ids=mailbox_ids or None,
+            disable_pgp=_tri(disable_pgp),
+            pinned=_tri(pinned),
         )
 
     @mcp.tool(
@@ -341,7 +360,9 @@ def register_tools(
         description=(
             "Enable or disable an alias, toggling its current state. A disabled alias "
             "silently stops forwarding mail but is preserved and can be re-enabled. "
-            "This is the non-destructive way to retire an alias."
+            "This is the non-destructive way to retire an alias. To stop mail from "
+            "ONE sender while leaving the alias working, use toggle_contact_block "
+            "instead."
         ),
     )
     @_surface_api_errors
@@ -349,3 +370,63 @@ def register_tools(
         alias_id: Annotated[int, Field(description="Numeric alias id.")],
     ) -> Any:
         return await client.toggle_alias(alias_id)
+
+    @mcp.tool(
+        tags={PermissionLevel.UPDATE.tag},
+        annotations=ADDITIVE,
+        description=(
+            "Block or unblock ONE sender on an alias, toggling that contact's "
+            "block_forward. Blocked senders stop being forwarded while the alias "
+            "keeps working for everyone else -- prefer this over toggle_alias when "
+            "dealing with a single spammy sender. Identify the contact by its "
+            "address (the sender's real address, or the reverse-alias it sends "
+            "from, both of which appear in mail headers) or by contact_id from "
+            "list_alias_contacts. Returns the resulting block state."
+        ),
+    )
+    @_surface_api_errors
+    async def toggle_contact_block(
+        alias_id: Annotated[
+            int,
+            Field(
+                description=(
+                    "Numeric id of the alias the contact belongs to. Required: the "
+                    "contact is verified against this alias before anything changes."
+                )
+            ),
+        ],
+        contact: Annotated[
+            str,
+            Field(
+                description=(
+                    "The contact's address, or its reverse-alias address. "
+                    "Case-insensitive. Leave empty if passing contact_id."
+                )
+            ),
+        ] = "",
+        contact_id: Annotated[
+            int,
+            Field(
+                ge=-1,
+                description=(
+                    "Numeric contact id from list_alias_contacts. -1 means resolve "
+                    "by address instead."
+                ),
+            ),
+        ] = -1,
+    ) -> Any:
+        resolved = await client.resolve_contact(
+            alias_id,
+            contact=contact,
+            contact_id=None if contact_id < 0 else contact_id,
+        )
+        result = await client.toggle_contact_block(resolved["id"])
+        # Echo what was acted on: the caller identified it by address, so confirm
+        # which contact that actually resolved to.
+        return {
+            "alias_id": alias_id,
+            "contact_id": resolved["id"],
+            "contact": resolved.get("contact"),
+            "reverse_alias_address": resolved.get("reverse_alias_address"),
+            "block_forward": (result or {}).get("block_forward"),
+        }

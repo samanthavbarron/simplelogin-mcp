@@ -289,7 +289,7 @@ class TestUpdateAgainstLiveAccount:
                         "alias_id": alias_id,
                         "note": note_for(run, "amended"),
                         "name": "E2E Lifecycle",
-                        "pinned": True,
+                        "pinned": "true",
                     },
                 )
                 amended = (

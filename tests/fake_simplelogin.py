@@ -95,6 +95,26 @@ class FakeSimpleLogin:
         self.activities.setdefault(alias_id, [])
         return alias
 
+    def add_contact(
+        self, alias_id: int, address: str, *, block_forward: bool = False
+    ) -> dict[str, Any]:
+        """Seed a contact directly, bypassing the HTTP layer."""
+        local = address.split("@")[0].replace(".", "_").replace("+", "_")
+        contact = {
+            "id": next(self._contact_ids),
+            "contact": address,
+            "creation_date": "2026-08-02 12:00:00+00:00",
+            "creation_timestamp": 1785686400,
+            "last_email_sent_date": None,
+            "last_email_sent_timestamp": None,
+            "reverse_alias": f"{address} <{local}_at_seed@simplelogin.co>",
+            "reverse_alias_address": f"{local}_at_seed@simplelogin.co",
+            "block_forward": block_forward,
+            "existed": False,
+        }
+        self.contacts.setdefault(alias_id, []).append(contact)
+        return contact
+
     def _auth_ok(self, request: Request) -> bool:
         return request.headers.get("Authentication") == self.api_key
 
@@ -304,6 +324,15 @@ class FakeSimpleLogin:
         self.contacts[alias_id].append(contact)
         return JSONResponse(contact, status_code=201)
 
+    async def _toggle_contact(self, request: Request) -> JSONResponse:
+        contact_id = int(request.path_params["contact_id"])
+        for contacts in self.contacts.values():
+            for contact in contacts:
+                if contact["id"] == contact_id:
+                    contact["block_forward"] = not contact["block_forward"]
+                    return JSONResponse({"block_forward": contact["block_forward"]})
+        return JSONResponse({"error": "Contact not found"}, status_code=404)
+
     async def _delete_alias(self, request: Request) -> JSONResponse:
         # Present so tests can prove the server never reaches it.
         alias_id = int(request.path_params["alias_id"])
@@ -357,6 +386,11 @@ class FakeSimpleLogin:
             Route(
                 "/api/aliases/{alias_id:int}/contacts",
                 self._create_contact,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/contacts/{contact_id:int}/toggle",
+                self._toggle_contact,
                 methods=["POST"],
             ),
         ]

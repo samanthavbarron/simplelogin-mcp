@@ -39,7 +39,7 @@ Levels are cumulative — each includes those below it.
 | --- | --- |
 | `read` | `get_alias_options`, `list_aliases`, `search_aliases`, `get_alias`, `get_alias_activities`, `list_alias_contacts`, `list_mailboxes` |
 | `create` | `create_custom_alias`, `create_random_alias`, `create_alias_contact` |
-| `update` | `update_alias`, `toggle_alias` |
+| `update` | `update_alias`, `toggle_alias`, `toggle_contact_block` |
 | `delete` | *(nothing — see below)* |
 
 Enforcement happens at two independent layers: tools above the configured level
@@ -74,6 +74,29 @@ upstream.
   included because alias creation is unusable without it.
 - **Contacts are premium-gated.** `create_alias_contact` returns SimpleLogin's
   upgrade message on free accounts.
+- **Blocking one sender** is `toggle_contact_block`, not `toggle_alias`. It
+  flips a single contact's `block_forward`, leaving the alias working for
+  everyone else. Identify the contact by its address or by its reverse-alias
+  address (both appear in mail headers), or by `contact_id`. The contact is
+  always resolved against the supplied `alias_id`, so an id belonging to a
+  different alias is refused rather than acted on.
+
+### Parameter shapes are gateway-driven
+
+Two conventions look odd in isolation and exist for a concrete reason. Some MCP
+gateways — LiteLLM's among them — validate arguments against the published
+schema *before* forwarding, while passing values through as strings. A union
+like `int | None` renders as `anyOf: [integer, null]`, which a string satisfies
+neither branch of, so such parameters are rejected outright.
+
+- `page_id` is a plain integer using **-1** as the "auto-paginate" sentinel.
+- `pinned` and `disable_pgp` are the string enum **`"true"` / `"false"` /
+  `"unchanged"`**, since string branches survive intact.
+- `mailbox_ids` is a plain list where **empty means unchanged**.
+
+Optional *string* parameters are unaffected and remain `str | None`.
+`tests/test_tool_schemas.py` enforces that no parameter is ever a union without
+a string branch.
 
 ## Development
 

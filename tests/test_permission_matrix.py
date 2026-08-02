@@ -38,6 +38,7 @@ TOOL_LEVELS: dict[str, PermissionLevel] = {
     "create_alias_contact": PermissionLevel.CREATE,
     "update_alias": PermissionLevel.UPDATE,
     "toggle_alias": PermissionLevel.UPDATE,
+    "toggle_contact_block": PermissionLevel.UPDATE,
 }
 
 #: Arguments valid enough to reach the API if permitted, so that a refusal is
@@ -62,6 +63,10 @@ TOOL_ARGS: dict[str, dict] = {
     },
     "update_alias": {"alias_id": SEEDED_ALIAS_ID, "note": "matrix"},
     "toggle_alias": {"alias_id": SEEDED_ALIAS_ID},
+    "toggle_contact_block": {
+        "alias_id": SEEDED_ALIAS_ID,
+        "contact": "matrix@example.com",
+    },
 }
 
 ALL_LEVELS = [
@@ -74,7 +79,10 @@ ALL_LEVELS = [
 
 @pytest.fixture(autouse=True)
 def _seed(fake: FakeSimpleLogin) -> None:
-    fake.add_alias(email="seed@aleeas.com", note="seed alias")
+    alias = fake.add_alias(email="seed@aleeas.com", note="seed alias")
+    # toggle_contact_block resolves against the alias's contacts, so give it one
+    # to find when the matrix exercises every permitted tool.
+    fake.add_contact(alias["id"], "matrix@example.com")
 
 
 def expected_tools(level: PermissionLevel) -> set[str]:

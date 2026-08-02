@@ -139,6 +139,212 @@ class TestAliasLifecycle:
         assert [a["email"] for a in found["aliases"]] == ["banking@aleeas.com"]
 
 
+class TestContactBlocking:
+    """Blocking one sender without touching the alias.
+
+    The motivating case: a spammy sender on an otherwise useful alias. The
+    caller arrives with an alias id and a sender address from a mail header,
+    not a contact id.
+    """
+
+    async def test_blocks_by_sender_address_and_is_reversible(
+        self, mcp_client_for: Callable[..., Client], fake: FakeSimpleLogin
+    ) -> None:
+        alias = fake.add_alias(email="news@aleeas.com")
+        spam = fake.add_contact(alias["id"], "no-reply@is.email.nextdoor.com")
+        keep = fake.add_contact(alias["id"], "friend@example.com")
+
+        async with mcp_client_for(PermissionLevel.UPDATE) as client:
+            blocked = (
+                await client.call_tool(
+                    "toggle_contact_block",
+                    {
+                        "alias_id": alias["id"],
+                        "contact": "no-reply@is.email.nextdoor.com",
+                    },
+                )
+            ).data
+            assert blocked["block_forward"] is True
+            assert blocked["contact_id"] == spam["id"]
+
+            # Unblocking is the same call again.
+            restored = (
+                await client.call_tool(
+                    "toggle_contact_block",
+                    {"alias_id": alias["id"], "contact_id": spam["id"]},
+                )
+            ).data
+            assert restored["block_forward"] is False
+
+        # The alias itself and every other contact are untouched throughout.
+        assert fake.aliases[alias["id"]]["enabled"] is True
+        assert keep["block_forward"] is False
+
+    async def test_resolves_by_reverse_alias_address(
+        self, mcp_client_for: Callable[..., Client], fake: FakeSimpleLogin
+    ) -> None:
+        """Mail headers carry the reverse-alias, not the real sender address."""
+        alias = fake.add_alias(email="news@aleeas.com")
+        spam = fake.add_contact(alias["id"], "no-reply@is.email.nextdoor.com")
+
+        async with mcp_client_for(PermissionLevel.UPDATE) as client:
+            result = (
+                await client.call_tool(
+                    "toggle_contact_block",
+                    {
+                        "alias_id": alias["id"],
+                        "contact": spam["reverse_alias_address"].upper(),
+                    },
+                )
+            ).data
+
+        assert result["contact_id"] == spam["id"]
+        assert result["block_forward"] is True
+
+    async def test_will_not_act_on_a_contact_from_another_alias(
+        self, mcp_client_for: Callable[..., Client], fake: FakeSimpleLogin
+    ) -> None:
+        """The safety property: a mistaken id must fail, not block the wrong sender."""
+        mine = fake.add_alias(email="mine@aleeas.com")
+        theirs = fake.add_alias(email="theirs@aleeas.com")
+        fake.add_contact(mine["id"], "someone@example.com")
+        foreign = fake.add_contact(theirs["id"], "victim@example.com")
+
+        async with mcp_client_for(PermissionLevel.UPDATE) as client:
+            with pytest.raises(ToolError, match="different alias"):
+                await client.call_tool(
+                    "toggle_contact_block",
+                    {"alias_id": mine["id"], "contact_id": foreign["id"]},
+                )
+
+        assert foreign["block_forward"] is False
+
+    async def test_unknown_contact_is_reported_clearly(
+        self, mcp_client_for: Callable[..., Client], fake: FakeSimpleLogin
+    ) -> None:
+        alias = fake.add_alias(email="news@aleeas.com")
+        fake.add_contact(alias["id"], "known@example.com")
+
+        async with mcp_client_for(PermissionLevel.UPDATE) as client:
+            with pytest.raises(ToolError, match="no contact matching"):
+                await client.call_tool(
+                    "toggle_contact_block",
+                    {"alias_id": alias["id"], "contact": "ghost@example.com"},
+                )
+
+    async def test_ambiguous_match_refuses_rather_than_guessing(
+        self, mcp_client_for: Callable[..., Client], fake: FakeSimpleLogin
+    ) -> None:
+        """Two contacts can share a reverse-alias prefix; picking one is wrong."""
+        alias = fake.add_alias(email="news@aleeas.com")
+        fake.add_contact(alias["id"], "dupe@example.com")
+        fake.add_contact(alias["id"], "dupe@example.com")
+
+        async with mcp_client_for(PermissionLevel.UPDATE) as client:
+            with pytest.raises(ToolError, match="matched 2 contacts"):
+                await client.call_tool(
+                    "toggle_contact_block",
+                    {"alias_id": alias["id"], "contact": "dupe@example.com"},
+                )
+
+    async def test_requires_some_way_to_identify_the_contact(
+        self, mcp_client_for: Callable[..., Client], fake: FakeSimpleLogin
+    ) -> None:
+        alias = fake.add_alias(email="news@aleeas.com")
+
+        async with mcp_client_for(PermissionLevel.UPDATE) as client:
+            with pytest.raises(ToolError, match="supply either contact"):
+                await client.call_tool(
+                    "toggle_contact_block", {"alias_id": alias["id"]}
+                )
+
+    async def test_finds_a_contact_beyond_the_first_page(
+        self, mcp_client_for: Callable[..., Client], fake: FakeSimpleLogin
+    ) -> None:
+        """The real motivating case: the sender worth blocking is an old one."""
+        alias = fake.add_alias(email="busy@aleeas.com")
+        for index in range(45):
+            fake.add_contact(alias["id"], f"filler{index}@example.com")
+        buried = fake.add_contact(alias["id"], "spammer@example.com")
+
+        async with mcp_client_for(PermissionLevel.UPDATE) as client:
+            result = (
+                await client.call_tool(
+                    "toggle_contact_block",
+                    {"alias_id": alias["id"], "contact": "spammer@example.com"},
+                )
+            ).data
+
+        assert result["contact_id"] == buried["id"]
+        assert result["block_forward"] is True
+
+    async def test_blocking_needs_update_level(
+        self, mcp_client_for: Callable[..., Client], fake: FakeSimpleLogin
+    ) -> None:
+        alias = fake.add_alias(email="news@aleeas.com")
+        contact = fake.add_contact(alias["id"], "spam@example.com")
+
+        for level in (PermissionLevel.READ, PermissionLevel.CREATE):
+            async with mcp_client_for(level) as client:
+                with pytest.raises(ToolError, match="requires permission level"):
+                    await client.call_tool(
+                        "toggle_contact_block",
+                        {"alias_id": alias["id"], "contact": "spam@example.com"},
+                    )
+
+        assert contact["block_forward"] is False
+
+
+class TestUpdateAliasTriState:
+    """pinned/disable_pgp are string enums, not optional bools -- see tools.py."""
+
+    async def test_unchanged_leaves_the_field_alone(
+        self, mcp_client_for: Callable[..., Client], fake: FakeSimpleLogin
+    ) -> None:
+        alias = fake.add_alias(email="tri@aleeas.com", pinned=True)
+
+        async with mcp_client_for(PermissionLevel.UPDATE) as client:
+            await client.call_tool(
+                "update_alias", {"alias_id": alias["id"], "note": "touched"}
+            )
+
+        assert fake.aliases[alias["id"]]["pinned"] is True
+        assert fake.aliases[alias["id"]]["note"] == "touched"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"), [("true", True), ("false", False)]
+    )
+    async def test_explicit_values_are_applied(
+        self,
+        mcp_client_for: Callable[..., Client],
+        fake: FakeSimpleLogin,
+        value: str,
+        expected: bool,
+    ) -> None:
+        alias = fake.add_alias(email="tri@aleeas.com", pinned=not expected)
+
+        async with mcp_client_for(PermissionLevel.UPDATE) as client:
+            await client.call_tool(
+                "update_alias", {"alias_id": alias["id"], "pinned": value}
+            )
+
+        assert fake.aliases[alias["id"]]["pinned"] is expected
+
+    async def test_empty_mailbox_ids_means_unchanged(
+        self, mcp_client_for: Callable[..., Client], fake: FakeSimpleLogin
+    ) -> None:
+        alias = fake.add_alias(email="tri@aleeas.com")
+        before = list(alias["mailboxes"])
+
+        async with mcp_client_for(PermissionLevel.UPDATE) as client:
+            await client.call_tool(
+                "update_alias",
+                {"alias_id": alias["id"], "note": "n", "mailbox_ids": []},
+            )
+
+        assert fake.aliases[alias["id"]]["mailboxes"] == before
+
+
 class TestPaginationThroughTools:
     async def test_auto_pagination_returns_everything(
         self, mcp_client_for: Callable[..., Client], fake: FakeSimpleLogin
@@ -282,7 +488,7 @@ class TestPermissionBoundariesMidWorkflow:
         async with mcp_client_for(PermissionLevel.UPDATE) as client:
             alias = (await client.call_tool("create_random_alias", {})).data
             await client.call_tool(
-                "update_alias", {"alias_id": alias["id"], "pinned": True}
+                "update_alias", {"alias_id": alias["id"], "pinned": "true"}
             )
             await client.call_tool("toggle_alias", {"alias_id": alias["id"]})
 

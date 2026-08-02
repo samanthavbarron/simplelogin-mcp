@@ -65,3 +65,37 @@ class TestPageIdSchema:
         """-1 must be within the declared bounds, or clients cannot send it."""
         schema = await schema_for(server_for, tool_name)
         assert schema["properties"]["page_id"]["minimum"] <= -1
+
+
+class TestNoGatewayHostileUnions:
+    """The general form of the bug, not just the instance we hit.
+
+    A gateway that stringifies arguments can satisfy a union only if one of its
+    branches accepts a string. ``str | None`` is therefore fine; ``int | None``,
+    ``bool | None`` and ``list | None`` are not, because no branch will accept
+    the string it is handed. Every parameter must be either a plain type or a
+    union with a string branch.
+    """
+
+    @staticmethod
+    def has_string_branch(branches: list[dict]) -> bool:
+        return any(b.get("type") == "string" for b in branches)
+
+    async def test_no_parameter_is_a_union_without_a_string_branch(
+        self, server_for: Callable[..., FastMCP]
+    ) -> None:
+        server = server_for(PermissionLevel.DELETE)
+        offenders: list[str] = []
+
+        for tool in await server.list_tools():
+            for name, prop in (tool.parameters.get("properties") or {}).items():
+                branches = prop.get("anyOf")
+                if branches and not self.has_string_branch(branches):
+                    kinds = [b.get("type") for b in branches]
+                    offenders.append(f"{tool.name}.{name} {kinds}")
+
+        assert not offenders, (
+            "these parameters render as unions no string can satisfy, so a "
+            "gateway that stringifies arguments will reject them: "
+            + "; ".join(offenders)
+        )

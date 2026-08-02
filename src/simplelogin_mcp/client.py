@@ -22,6 +22,12 @@ from .errors import (
 #: SimpleLogin returns at most this many items per page on every list endpoint.
 PAGE_SIZE = 20
 
+#: How deep to page when *searching* an alias's contacts for one to act on.
+#: Higher than the display cap: a long-lived alias accumulates a contact per
+#: sender, and the one worth blocking is often an old one well past the first
+#: page. There is no contact-search endpoint upstream, so paging is the only way.
+CONTACT_SEARCH_PAGES = 25
+
 
 class SimpleLoginClient:
     """Thin, typed wrapper over the subset of endpoints this server exposes."""
@@ -301,6 +307,75 @@ class SimpleLoginClient:
         return await self._request(
             "POST", f"/api/aliases/{alias_id}/contacts", json={"contact": contact}
         )
+
+    async def resolve_contact(
+        self,
+        alias_id: int,
+        *,
+        contact: str = "",
+        contact_id: int | None = None,
+        max_pages: int = CONTACT_SEARCH_PAGES,
+    ) -> dict[str, Any]:
+        """Find one contact belonging to ``alias_id``.
+
+        Resolution always walks the alias's own contact list, even when an id was
+        supplied. That costs a request or two but buys a real safety property:
+        an id that belongs to a *different* alias cannot be acted on, so a
+        mistaken or hallucinated id fails loudly instead of blocking the wrong
+        sender.
+
+        Matching is case-insensitive against the contact address and its
+        reverse-alias address, since callers typically have the latter from a
+        mail header rather than the former.
+        """
+        if contact_id is None and not contact.strip():
+            raise SimpleLoginError(
+                "supply either contact (an address) or contact_id to identify "
+                "which contact to act on"
+            )
+
+        needle = contact.strip().lower()
+        matches: list[dict[str, Any]] = []
+        page = 0
+        while page < max_pages:
+            payload = await self._request(
+                "GET", f"/api/aliases/{alias_id}/contacts", params={"page_id": page}
+            )
+            items = payload.get("contacts", []) if isinstance(payload, dict) else []
+            for entry in items:
+                if contact_id is not None:
+                    if entry.get("id") == contact_id:
+                        return entry
+                elif needle in (
+                    str(entry.get("contact", "")).lower(),
+                    str(entry.get("reverse_alias_address", "")).lower(),
+                ):
+                    matches.append(entry)
+            if len(items) < PAGE_SIZE:
+                break
+            page += 1
+
+        if contact_id is not None:
+            raise NotFoundError(
+                f"contact {contact_id} was not found on alias {alias_id}. It may "
+                "belong to a different alias."
+            )
+        if not matches:
+            raise NotFoundError(
+                f"no contact matching {contact!r} was found on alias {alias_id} "
+                f"within the first {max_pages} pages of its contacts."
+            )
+        if len(matches) > 1:
+            found = ", ".join(f"{m['id']}:{m['contact']}" for m in matches[:5])
+            raise SimpleLoginError(
+                f"{contact!r} matched {len(matches)} contacts on alias {alias_id} "
+                f"({found}). Pass contact_id to disambiguate."
+            )
+        return matches[0]
+
+    async def toggle_contact_block(self, contact_id: int) -> Any:
+        """Flip a contact's ``block_forward``. Reversible, and per-sender."""
+        return await self._request("POST", f"/api/contacts/{contact_id}/toggle")
 
     # ---------------------------------------------------------------- mailboxes
 
