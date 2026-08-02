@@ -65,6 +65,36 @@ class TestPagination:
         assert len(result["aliases"]) == 40
         assert result["has_more"] is True
 
+    @pytest.mark.parametrize(
+        ("total", "max_pages", "expected_items", "expected_pages"),
+        [
+            (60, 2, 40, 2),  # cap hit — previously reported 3
+            (45, 10, 45, 3),
+            (20, 10, 20, 2),  # full page then an empty one
+            (0, 10, 0, 1),
+            (40, 2, 40, 2),  # cap lands exactly on the last full page
+        ],
+    )
+    async def test_pages_fetched_counts_actual_requests(
+        self,
+        fake: FakeSimpleLogin,
+        total: int,
+        max_pages: int,
+        expected_items: int,
+        expected_pages: int,
+    ) -> None:
+        """pages_fetched must match reality; it was off by one at the cap."""
+        for index in range(total):
+            fake.add_alias(email=f"alias{index}@aleeas.com")
+        fake.request_log.clear()
+
+        result = await client_for(fake).list_aliases(max_pages=max_pages)
+
+        assert len(result["aliases"]) == expected_items
+        assert result["pages_fetched"] == expected_pages
+        # The count is only meaningful if it matches the requests actually made.
+        assert len(fake.request_log) == expected_pages
+
     async def test_exactly_one_full_page_is_not_reported_as_truncated(
         self, fake: FakeSimpleLogin
     ) -> None:

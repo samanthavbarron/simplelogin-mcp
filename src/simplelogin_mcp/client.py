@@ -142,21 +142,21 @@ class SimpleLoginClient:
             }
 
         collected: list[Any] = []
-        page = 0
+        fetched = 0
         has_more = False
-        while page < max_pages:
+        while fetched < max_pages:
             payload = await self._request(
-                "GET", path, params={**(params or {}), "page_id": page}
+                "GET", path, params={**(params or {}), "page_id": fetched}
             )
             items = payload.get(key, []) if isinstance(payload, dict) else []
             collected.extend(items)
+            fetched += 1
             if len(items) < PAGE_SIZE:
                 break
-            page += 1
             # Ran out of budget with a full page in hand: more probably remain.
-            if page >= max_pages:
+            if fetched >= max_pages:
                 has_more = True
-        return {key: collected, "pages_fetched": page + 1, "has_more": has_more}
+        return {key: collected, "pages_fetched": fetched, "has_more": has_more}
 
     # ------------------------------------------------------------------ aliases
 

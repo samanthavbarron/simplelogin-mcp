@@ -26,6 +26,38 @@ from .permissions import PermissionLevel
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 ADDITIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 
+#: Sentinel meaning "no explicit page -- auto-paginate from the first".
+AUTO_PAGINATE = -1
+
+#: ``page_id`` is deliberately a plain ``int`` with a sentinel rather than the
+#: more natural ``int | None``.
+#:
+#: An optional int renders as ``anyOf: [{"type": "integer"}, {"type": "null"}]``.
+#: LiteLLM's MCP gateway validates arguments against the published schema before
+#: forwarding them, and the values arrive there as strings -- a string satisfies
+#: neither branch, so every paginated call failed with "'0' is not valid under
+#: any of the given schemas" (observed in production 2026-08-02). A bare
+#: ``{"type": "integer"}`` is coerced instead, and works.
+#:
+#: This cannot be fixed server-side: the rejection happens upstream, against the
+#: schema we publish, before the request ever reaches us. Optional *string*
+#: parameters are unaffected, because a string matches their string branch.
+PageId = Annotated[
+    int,
+    Field(
+        ge=AUTO_PAGINATE,
+        description=(
+            "0-based page, 20 items per page. Omit (or pass -1) to auto-paginate "
+            "from the first page up to the server's page cap."
+        ),
+    ),
+]
+
+
+def _explicit_page(page_id: int) -> int | None:
+    """Map the sentinel back onto the client's optional ``page_id``."""
+    return None if page_id <= AUTO_PAGINATE else page_id
+
 
 def _surface_api_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Turn SimpleLogin failures into ToolError with the API's own wording.
@@ -92,17 +124,16 @@ def register_tools(
     )
     @_surface_api_errors
     async def list_aliases(
-        page_id: Annotated[
-            int | None,
-            Field(ge=0, description="0-based page. Omit to auto-paginate."),
-        ] = None,
+        page_id: PageId = AUTO_PAGINATE,
         filter_by: Annotated[
             Literal["pinned", "disabled", "enabled"] | None,
             Field(description="Return only aliases in this state."),
         ] = None,
     ) -> Any:
         return await client.list_aliases(
-            page_id=page_id, max_pages=max_auto_pages, filter_by=filter_by
+            page_id=_explicit_page(page_id),
+            max_pages=max_auto_pages,
+            filter_by=filter_by,
         )
 
     @mcp.tool(
@@ -113,9 +144,11 @@ def register_tools(
     @_surface_api_errors
     async def search_aliases(
         query: Annotated[str, Field(description="Free-text search over aliases.")],
-        page_id: Annotated[int | None, Field(ge=0)] = None,
+        page_id: PageId = AUTO_PAGINATE,
     ) -> Any:
-        return await client.list_aliases(query=query, page_id=page_id)
+        return await client.list_aliases(
+            query=query, page_id=_explicit_page(page_id)
+        )
 
     @mcp.tool(
         tags={PermissionLevel.READ.tag},
@@ -139,13 +172,10 @@ def register_tools(
     @_surface_api_errors
     async def get_alias_activities(
         alias_id: Annotated[int, Field(description="Numeric alias id.")],
-        page_id: Annotated[
-            int | None,
-            Field(ge=0, description="0-based page. Omit to auto-paginate."),
-        ] = None,
+        page_id: PageId = AUTO_PAGINATE,
     ) -> Any:
         return await client.get_alias_activities(
-            alias_id, page_id=page_id, max_pages=max_auto_pages
+            alias_id, page_id=_explicit_page(page_id), max_pages=max_auto_pages
         )
 
     @mcp.tool(
@@ -156,13 +186,10 @@ def register_tools(
     @_surface_api_errors
     async def list_alias_contacts(
         alias_id: Annotated[int, Field(description="Numeric alias id.")],
-        page_id: Annotated[
-            int | None,
-            Field(ge=0, description="0-based page. Omit to auto-paginate."),
-        ] = None,
+        page_id: PageId = AUTO_PAGINATE,
     ) -> Any:
         return await client.list_alias_contacts(
-            alias_id, page_id=page_id, max_pages=max_auto_pages
+            alias_id, page_id=_explicit_page(page_id), max_pages=max_auto_pages
         )
 
     @mcp.tool(
