@@ -1,0 +1,38 @@
+[project]
+name = "simplelogin-mcp"
+version = "0.1.0"
+description = "HTTP MCP server exposing a permission-gated subset of the SimpleLogin alias API"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+dependencies = [
+    "fastmcp>=3.4.5,<4",
+    "httpx>=0.28.1",
+    "pydantic>=2.13",
+    "pydantic-settings>=2.14",
+    "uvicorn>=0.52",
+]
+
+[project.scripts]
+simplelogin-mcp = "simplelogin_mcp.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1",
+    "pytest-asyncio>=1.4",
+    "respx>=0.23.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/simplelogin_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "live: talks to the real SimpleLogin API (requires SI_API_TEST_KEY)",
+    "image: exercises the built container image (requires docker)",
+]

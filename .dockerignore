@@ -1,0 +1,14 @@
+# Keep credentials and local state out of the build context entirely.
+.env
+.git
+.github
+.venv
+tests
+*.md
+.gitignore
+.dockerignore
+Dockerfile
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache

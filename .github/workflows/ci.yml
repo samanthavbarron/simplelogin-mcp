@@ -1,0 +1,209 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: Unit and mock tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked --dev
+
+      - name: Run offline test suite
+        # Excludes anything needing a container or the live API, so this job
+        # runs identically on forked pull requests.
+        run: uv run pytest -v -m "not image and not live"
+
+  image-e2e:
+    name: E2E against the built image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked --dev
+
+      - name: Build image under test
+        run: docker build -t simplelogin-mcp:test .
+
+      - name: Run E2E against the built image
+        # Points the suite at the image just built rather than rebuilding it,
+        # so what is tested is what was produced.
+        env:
+          SLMCP_IMAGE: simplelogin-mcp:test
+          CONTAINER_ENGINE: docker
+        run: uv run pytest -v -m "image and not live"
+
+  live-e2e:
+    name: E2E against the live SimpleLogin API
+    runs-on: ubuntu-latest
+    needs: [test, image-e2e]
+    # Serialise only this job: the tests share one SimpleLogin account, so
+    # concurrent runs would race on its state, its alias quota and its creation
+    # rate limit. Queue rather than cancel, so a run never dies mid-teardown and
+    # leaves aliases behind.
+    concurrency:
+      group: simplelogin-live-account
+      cancel-in-progress: false
+    #
+    # TEMPORARY: manual runs only.
+    #
+    # The shared test account is currently throttled on alias creation (a window
+    # was measured still refusing after ~55 minutes), which would fail this job
+    # and block publishing. Until it clears, trigger this by hand via
+    # workflow_dispatch to check whether the throttle has lifted.
+    #
+    # To re-enable automatic runs:
+    #   1. Replace the `if:` below with the fork guard kept beneath it.
+    #   2. Add `live-e2e` back to the `publish` job's `needs:`.
+    #
+    if: github.event_name == 'workflow_dispatch'
+    # Restore this condition when re-enabling. Secrets are unavailable to forked
+    # pull requests, so running there fails confusingly rather than usefully.
+    # Deliberately not using pull_request_target, which would expose secrets to
+    # untrusted contributor code.
+    #
+    #   if: >-
+    #     github.event_name != 'pull_request' ||
+    #     github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked --dev
+
+      - name: Build image under test
+        run: docker build -t simplelogin-mcp:test .
+
+      - name: Run live E2E
+        env:
+          SI_API_TEST_KEY: ${{ secrets.SI_API_TEST_KEY }}
+          SLMCP_IMAGE: simplelogin-mcp:test
+          CONTAINER_ENGINE: docker
+        run: |
+          if [ -z "$SI_API_TEST_KEY" ]; then
+            echo "::warning::SI_API_TEST_KEY is not configured; skipping live E2E"
+            exit 0
+          fi
+          uv run pytest -v -m live
+
+  publish:
+    name: Publish to GHCR
+    runs-on: ubuntu-latest
+    # `live-e2e` is deliberately absent while it is limited to manual runs; a
+    # job that never runs on push would block this one forever. Add it back
+    # alongside re-enabling that job.
+    needs: [test, image-e2e]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          outputs: >-
+            type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  merge-manifest:
+    name: Merge multi-arch manifest
+    runs-on: ubuntu-latest
+    needs: [publish]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$(echo ${{ github.sha }} | cut -c1-7) \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Verify the published manifest
+        run: |
+          docker buildx imagetools inspect \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
